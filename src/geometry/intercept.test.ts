@@ -164,7 +164,8 @@ describe('画面分段与区间表同源', () => {
     // 命中区间 t∈[1/3,2/3]（lon 170→190），内部在 lon=180 穿越一次 → 两个画面段
     expect(segs).toHaveLength(2);
     expect(toNumber(segs[0].p0.lon)).toBeCloseTo(170, 6);
-    expect(toNumber(segs[0].p1.lon)).toBeCloseTo(-180, 6);
+    // 切点随子段所在窗口：西片段止于 +180（右边缘），东片段起于 −180（左边缘）
+    expect(toNumber(segs[0].p1.lon)).toBeCloseTo(180, 6);
     expect(toNumber(segs[1].p0.lon)).toBeCloseTo(-180, 6);
     expect(toNumber(segs[1].p1.lon)).toBeCloseTo(-170, 6);
   });
@@ -205,8 +206,100 @@ describe('画面分段与区间表同源', () => {
   });
 });
 
-describe('必要的世界副本与边界表示', () => {
-  it('航路点直接用 +540° 边界录入（与 180° 等价，卷绕到 -180°）', () => {
+describe('日界线绘制回归（三组小坐标验收）', () => {
+  // 与 Chart.tsx 相同的经度→像素映射，用于核对画面跨度
+  const W = 1080;
+  const xOf = (lonDeg: number): number => ((lonDeg + 180) / 360) * W;
+
+  it('竖直命中段：经度不变、纬度穿过禁区，绘图不抛除零，竖直片段与见证一致', () => {
+    const { r, a } = run(crossingBoxCW, [P(15, 175), P(-15, 175)]);
+    expect(a.intervals).toHaveLength(1);
+    const iv = a.intervals[0];
+    // 命中 t∈[1/6, 1/2]（lat 10°→0°，lon 恒 175°）
+    expect(cmp(iv.enter.t, frac(1n, 6n))).toBe(0);
+    expect(cmp(iv.exit.t, frac(1n, 2n))).toBe(0);
+
+    let pieces: ReturnType<typeof buildRoutePieces> = [];
+    expect(() => {
+      pieces = buildRoutePieces(r.points, a.segHits);
+    }).not.toThrow();
+    // 竖直段不跨日界线：恰好一个画面段，端点与进入/离开见证一致
+    expect(pieces).toHaveLength(1);
+    expect(pieces[0].geo).toHaveLength(1);
+    const seg = pieces[0].geo[0];
+    expect(eq(seg.p0.lat, iv.enter.geo.lat)).toBe(true);
+    expect(eq(seg.p0.lon, iv.enter.geo.lon)).toBe(true);
+    expect(eq(seg.p1.lat, iv.exit.geo.lat)).toBe(true);
+    expect(eq(seg.p1.lon, iv.exit.geo.lon)).toBe(true);
+    expect(eq(seg.p0.lon, fromInt(175))).toBe(true);
+    expect(eq(seg.p0.lon, seg.p1.lon)).toBe(true);
+  });
+
+  it('竖直段压在禁区边界经线（190°≡−170°）与日界线（180°）上也不抛异常', () => {
+    for (const lon of [190, 180]) {
+      const { r, a } = run(crossingBoxCW, [P(5, lon), P(-5, lon)]);
+      expect(a.segHits[0]).toHaveLength(1);
+      let pieces: ReturnType<typeof buildRoutePieces> = [];
+      expect(() => {
+        pieces = buildRoutePieces(r.points, a.segHits);
+      }).not.toThrow();
+      expect(pieces).toHaveLength(1);
+      expect(pieces[0].geo).toHaveLength(1);
+      const seg = pieces[0].geo[0];
+      expect(eq(seg.p0.lon, seg.p1.lon)).toBe(true); // 仍为竖直片段
+    }
+  });
+
+  it('不对称跨线命中：参数 1/10–13/20 切成两片短段，端点精确落在日界线两侧', () => {
+    const zone = [P(10, 172), P(10, 183), P(0, 183), P(0, 172)];
+    const route = [P(5, 170), P(5, 190)];
+    const { r, a } = run(zone, route);
+    expect(a.intervals).toHaveLength(1);
+    const iv = a.intervals[0];
+    // 区间表：进入 t=1/10（172°），离开 t=13/20（183°≡−177°）
+    expect(cmp(iv.enter.t, frac(1n, 10n))).toBe(0);
+    expect(cmp(iv.exit.t, frac(13n, 20n))).toBe(0);
+
+    const pieces = buildRoutePieces(r.points, a.segHits);
+    expect(pieces).toHaveLength(1);
+    const segs = pieces[0].geo;
+    // 片数与命中参数一致：t=1/2 处在日界线断开，两侧各一短片段
+    expect(segs).toHaveLength(2);
+    expect(eq(segs[0].p0.lon, fromInt(172))).toBe(true);
+    expect(eq(segs[0].p1.lon, fromInt(180))).toBe(true);
+    expect(eq(segs[1].p0.lon, fromInt(-180))).toBe(true);
+    expect(eq(segs[1].p1.lon, fromInt(-177))).toBe(true);
+    for (const s of segs) {
+      expect(eq(s.p0.lat, fromInt(5))).toBe(true);
+      expect(eq(s.p1.lat, fromInt(5))).toBe(true);
+    }
+    // SVG 不出现横跨整图的命中线：每片横向跨度远小于图宽
+    for (const s of segs) {
+      const span = Math.abs(xOf(toNumber(s.p1.lon)) - xOf(toNumber(s.p0.lon)));
+      expect(span).toBeLessThanOrEqual(W / 2);
+    }
+  });
+
+  it('贴线禁区（一条边贴住 180° 未跨线）：只画实际占地一片，无零面积幽灵片', () => {
+    const z = createZone([P(10, 170), P(10, 180), P(0, 180), P(0, 170)]);
+    const pieces = buildZonePieces(z.points);
+    expect(pieces).toHaveLength(1);
+    const lons = pieces[0].points.map((p) => toNumber(p.lon));
+    expect(Math.min(...lons)).toBeGreaterThanOrEqual(170);
+    expect(Math.max(...lons)).toBeLessThanOrEqual(180);
+  });
+
+  it('贴线禁区（一条边贴住 −180° 未跨线）：同样无对侧幽灵片', () => {
+    const z = createZone([P(10, -180), P(10, -170), P(0, -170), P(0, -180)]);
+    const pieces = buildZonePieces(z.points);
+    expect(pieces).toHaveLength(1);
+    const lons = pieces[0].points.map((p) => toNumber(p.lon));
+    expect(Math.min(...lons)).toBeGreaterThanOrEqual(-180);
+    expect(Math.max(...lons)).toBeLessThanOrEqual(-170);
+  });
+});
+
+describe('必要的世界副本与边界表示', () => {  it('航路点直接用 +540° 边界录入（与 180° 等价，卷绕到 -180°）', () => {
     // 510° = 150°E 短弧展开；540° 与 -180° 同一经线
     const { a } = run(crossingBoxCW, [P(5, 510), P(5, 540)]);
     expect(a.intervals).toHaveLength(1);

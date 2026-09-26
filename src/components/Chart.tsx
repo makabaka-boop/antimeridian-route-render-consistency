@@ -186,15 +186,11 @@ function UnwrappedRoute({ raw }: { raw: MicroPoint[] }) {
     }
     const ts = [0, ...crossings.sort((x, y) => x - y), 1];
     for (let k = 0; k < ts.length - 1; k++) {
-      const wrap = (lon: number): number => {
-        let w = lon;
-        while (w < -180) w += 360;
-        while (w >= 180) w -= 360;
-        return w;
-      };
       const lonA = prevLon + (nextLon - prevLon) * ts[k];
       const lonB = prevLon + (nextLon - prevLon) * ts[k + 1];
-      segs.push({ x1: xOf(wrap(lonA)), y1: yOf(aLat + (bLat - aLat) * ts[k]), x2: xOf(wrap(lonB)), y2: yOf(aLat + (bLat - aLat) * ts[k + 1]) });
+      // 每个子段归入其中点所在窗口：压在日界线上的端点落在正确一侧，不横跨整图
+      const q = Math.floor(((lonA + lonB) / 2 + 180) / 360);
+      segs.push({ x1: xOf(lonA - 360 * q), y1: yOf(aLat + (bLat - aLat) * ts[k]), x2: xOf(lonB - 360 * q), y2: yOf(aLat + (bLat - aLat) * ts[k + 1]) });
     }
     prevLon = nextLon;
   }
