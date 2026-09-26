@@ -10,7 +10,7 @@ export interface RouteSub {
   t1: Fraction;
 }
 
-/** 一条被截航路在某个经度窗口 [−180,180) 内的画面段（多边形填充条带或折线） */
+/** 一条被截航路在某个经度世界窗口内的画面段（多边形填充条带或折线） */
 export interface RoutePiece {
   segIndex: number;
   geo: { p0: FPoint; p1: FPoint }[];
@@ -33,7 +33,10 @@ const mid = (a: Fraction, b: Fraction): Fraction => mul(add(a, b), HALF);
 export function splitSubAtDateline(a: MicroPoint, b: MicroPoint, t0: Fraction, t1: Fraction): RouteSub[] {
   const lon0 = md(a.lon);
   const lon1 = md(b.lon);
-  const lon = (t: Fraction): Fraction => add(lon0, mul(sub(lon1, lon0), t));
+  const dLon = sub(lon1, lon0);
+  // 经度不变（含竖直航段）：不存在内部穿越，直接返回原子区间
+  if (eq(dLon, ZERO)) return [{ t0, t1 }];
+  const lon = (t: Fraction): Fraction => add(lon0, mul(dLon, t));
   const m0 = lon(t0);
   const m1 = lon(t1);
 
@@ -41,9 +44,10 @@ export function splitSubAtDateline(a: MicroPoint, b: MicroPoint, t0: Fraction, t
   const qCenter = Number(floorF(div(add(mid(m0, m1), BOUND), WORLD)));
   for (let q = qCenter - 1; q <= qCenter + 1; q++) {
     const x = add(BOUND, mul(WORLD, fromInt(q)));
-    // t = (x - lon(t0)) / (lon(t1) - lon(t0))，严格位于子区间内部才算穿越
-    const t = div(sub(x, m0), sub(m1, m0));
-    if (cmp(t, t0) > 0 && cmp(t, t1) < 0) crossings.push(t);
+    // 穿越点的「整段参数」：t = (x - lon(0)) / (lon(1) - lon(0))，
+    // 再换算成子区间局部参数；严格位于子区间内部才算穿越
+    const tSeg = div(sub(x, lon0), dLon);
+    if (cmp(tSeg, t0) > 0 && cmp(tSeg, t1) < 0) crossings.push(tSeg);
   }
   crossings.sort(cmp);
 
@@ -51,18 +55,26 @@ export function splitSubAtDateline(a: MicroPoint, b: MicroPoint, t0: Fraction, t
   return cuts.slice(0, -1).map((c, i) => ({ t0: c, t1: cuts[i + 1] }));
 }
 
-const pointGeoAt = (a: MicroPoint, b: MicroPoint, t: Fraction): FPoint => {
+/**
+ * 把展开经度归一化到子片段所在世界窗口 q：映射后落在 (-180, 180]。
+ * 与 wrapLon（[-180,180)）的区别在于切点 180+360q 归入窗口**东缘 +180°**，
+ * 使日界线两侧的短片段各自贴住所在一侧边缘，而不是被甩到对侧形成横跨整图的长线。
+ */
+const geoLonInWindow = (lon: Fraction, q: number): Fraction =>
+  sub(lon, mul(WORLD, fromInt(q)));
+
+const pointGeoAt = (a: MicroPoint, b: MicroPoint, t: Fraction, q: number): FPoint => {
   const lifted: FPoint = {
     lat: add(md(a.lat), mul(sub(md(b.lat), md(a.lat)), t)),
     lon: add(md(a.lon), mul(sub(md(b.lon), md(a.lon)), t)),
   };
-  // 卷绕到 [-180,180)；恰好在边界上的点（切点）归入相邻窗口一侧
-  let q = floorF(div(add(lifted.lon, BOUND), WORLD));
-  let wlon = sub(lifted.lon, mul(WORLD, fromInt(q)));
-  if (eq(wlon, BOUND)) {
-    wlon = sub(wlon, WORLD);
-  }
-  return { lat: lifted.lat, lon: wlon };
+  return { lat: lifted.lat, lon: geoLonInWindow(lifted.lon, q) };
+};
+
+/** 子片段中点经度所在的世界窗口编号：中点 ∈ (180+360(q−1), 180+360q] → q */
+const windowOf = (a: MicroPoint, b: MicroPoint, t0: Fraction, t1: Fraction): number => {
+  const lon = (t: Fraction): Fraction => add(md(a.lon), mul(sub(md(b.lon), md(a.lon)), t));
+  return Number(floorF(div(add(mid(lon(t0), lon(t1)), BOUND), WORLD)));
 };
 
 /**
@@ -78,7 +90,9 @@ export function buildRoutePieces(routePts: MicroPoint[], segHits: SegHit[][]): R
     const geo: { p0: FPoint; p1: FPoint }[] = [];
     for (const h of segHits[i]) {
       for (const s of splitSubAtDateline(a, b, h.t0, h.t1)) {
-        geo.push({ p0: pointGeoAt(a, b, s.t0), p1: pointGeoAt(a, b, s.t1) });
+        // 按子片段所在窗口归一化，日界线切点贴住本侧边缘，杜绝横跨整图的连线
+        const q = windowOf(a, b, s.t0, s.t1);
+        geo.push({ p0: pointGeoAt(a, b, s.t0, q), p1: pointGeoAt(a, b, s.t1, q) });
       }
     }
     if (geo.length) pieces.push({ segIndex: i, geo });
@@ -140,7 +154,9 @@ export function buildZonePieces(zonePts: MicroPoint[]): ZonePiece[] {
     c = clipPolygon(c, sub(ZERO, BOUND), ZERO, ZERO, sub(ZERO, ONE));
     if (c.length >= 3) {
       const area = polygonArea(c);
-      if (area !== ZERO && !pieces.some((pc) => samePiece(pc.points, c))) {
+      // 面积必须按值比较（分数运算结果恒为新对象，引用比较会漏掉共线零面积片）；
+      // 禁区仅以一条边贴住 180° 时对侧裁剪退化为零面积，在此丢弃，不生成幽灵片。
+      if (!eq(area, ZERO) && !pieces.some((pc) => samePiece(pc.points, c))) {
         pieces.push({ points: c });
       }
     }

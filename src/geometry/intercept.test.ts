@@ -161,12 +161,16 @@ describe('画面分段与区间表同源', () => {
     const pieces = buildRoutePieces(r.points, a.segHits);
     expect(pieces).toHaveLength(1);
     const segs = pieces[0].geo;
-    // 命中区间 t∈[1/3,2/3]（lon 170→190），内部在 lon=180 穿越一次 → 两个画面段
+    // 命中区间 t∈[1/3,2/3]（lon 170→190），内部在 lon=180 穿越一次 → 两个画面段；
+    // 切点必须贴住各自一侧的窗口边缘（西侧 +180°、东侧 −180°），不得连成横跨整图的长线
     expect(segs).toHaveLength(2);
     expect(toNumber(segs[0].p0.lon)).toBeCloseTo(170, 6);
-    expect(toNumber(segs[0].p1.lon)).toBeCloseTo(-180, 6);
+    expect(toNumber(segs[0].p1.lon)).toBeCloseTo(180, 6);
     expect(toNumber(segs[1].p0.lon)).toBeCloseTo(-180, 6);
     expect(toNumber(segs[1].p1.lon)).toBeCloseTo(-170, 6);
+    for (const s of segs) {
+      expect(Math.abs(toNumber(s.p1.lon) - toNumber(s.p0.lon))).toBeLessThan(180);
+    }
   });
 
   it('禁区在日界线处切成两个闭合多边形片，分居左右边缘', () => {
